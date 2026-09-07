@@ -450,19 +450,9 @@ Output jar: `build/libs/GGvGoons-1.0.0.jar` — drop it into your Paper or Arcli
 **Estimated Time**: 2-3 weeks
 **Detailed Plan**: [`plans/phase6-admin-config-system-plan.md`](plans/phase6-admin-config-system-plan.md)
 
-#### Future Enhancements (Post-Phase 6)
-- [ ] Enhanced prisoner system (movement restrictions, escape mechanics)
-- [ ] Arclight-specific combat integration
-- [ ] Territory control system
-- [ ] Bounty system
-- [ ] Combat logging and analytics
-- [ ] Economy system
-- [ ] Achievement system
-- [ ] War zones with special rules
-
 **Master Plan**: [`plans/phase3-6-master-plan.md`](plans/phase3-6-master-plan.md)
 
-**Total Estimated Timeline**: 13-18 weeks (single developer) or 12-16 weeks (parallel development)
+**Total Estimated Timeline**: 1
 
 ## Troubleshooting
 
