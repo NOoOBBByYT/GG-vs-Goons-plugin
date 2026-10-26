@@ -20,7 +20,6 @@ object PrisonerPersistence {
      *   <prisonerId>:
      *     captor: <captorId>
      *     previousGameMode: <gamemode>
-     * im fucking touching zaidyn
      */
     fun savePrisoners(prisoners: Map<UUID, Prisoner>, file: File, logger: Logger) {
         try {
@@ -32,7 +31,7 @@ object PrisonerPersistence {
                 yaml.set("$path.previousGameMode", prisoner.previousGameMode.name)
             }
             
-            yaml.save(file)
+            SafeYaml.save(yaml, file)
             logger.info("Saved ${prisoners.size} prisoner(s) to ${file.name}")
         } catch (e: Exception) {
             logger.severe("Failed to save prisoner data: ${e.message}")
@@ -51,39 +50,29 @@ object PrisonerPersistence {
         }
 
         try {
-            val yaml = YamlConfiguration.loadConfiguration(file)
+            val yaml = SafeYaml.load(file)
             val prisoners = mutableMapOf<UUID, Prisoner>()
             
-            val prisonersSection = yaml.getConfigurationSection("prisoners")
-            if (prisonersSection == null) {
-                logger.info("No prisoners section in data file - starting fresh")
-                return emptyMap()
-            }
+            val prisonersSection = SafeYaml.requireSection(yaml, "prisoners", file) ?: return emptyMap()
 
             prisonersSection.getKeys(false).forEach { prisonerIdStr ->
                 try {
+                    require(prisonersSection.isConfigurationSection(prisonerIdStr)) { "Invalid prisoner entry: $prisonerIdStr" }
                     val prisonerId = UUID.fromString(prisonerIdStr)
                     val captorIdStr = prisonersSection.getString("$prisonerIdStr.captor")
                     val gameModeStr = prisonersSection.getString("$prisonerIdStr.previousGameMode")
-                    
-                    if (captorIdStr != null && gameModeStr != null) {
-                        val captorId = UUID.fromString(captorIdStr)
-                        val gameMode = GameMode.valueOf(gameModeStr)
-                        prisoners[prisonerId] = Prisoner(captorId, gameMode)
-                    } else {
-                        logger.warning("Incomplete prisoner data for $prisonerIdStr - skipping")
-                    }
+                    val captorId = UUID.fromString(requireNotNull(captorIdStr) { "Missing captor for $prisonerIdStr" })
+                    val gameMode = GameMode.valueOf(requireNotNull(gameModeStr) { "Missing game mode for $prisonerIdStr" })
+                    prisoners[prisonerId] = Prisoner(captorId, gameMode)
                 } catch (e: Exception) {
-                    logger.warning("Failed to parse prisoner entry $prisonerIdStr: ${e.message}")
+                    throw IllegalStateException("Invalid prisoner entry $prisonerIdStr in ${file.name}", e)
                 }
             }
             
             logger.info("Loaded ${prisoners.size} prisoner(s) from ${file.name}")
             return prisoners
         } catch (e: Exception) {
-            logger.severe("Failed to load prisoner data: ${e.message}")
-            e.printStackTrace()
-            return emptyMap()
+            throw IllegalStateException("Failed to load prisoner data from ${file.name}; original file was not modified", e)
         }
     }
 }

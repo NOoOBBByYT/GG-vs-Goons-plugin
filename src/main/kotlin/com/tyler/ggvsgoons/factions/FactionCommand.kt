@@ -389,7 +389,6 @@ class FactionCommand(
             return
         }
         
-        // TODO: Implement teleport warmup and cooldown
         player.teleport(home)
         player.sendMessage("${ChatColor.GREEN}Teleported to faction home")
     }

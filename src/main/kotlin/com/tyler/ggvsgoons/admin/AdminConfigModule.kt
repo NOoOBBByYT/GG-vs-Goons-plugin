@@ -29,13 +29,11 @@ class AdminConfigModule(private val plugin: GGvGPlugin) : GGvGModule {
     
     private var cleanupTaskId: Int = -1
     private var autoBackupTaskId: Int = -1
+    val isRegistered: Boolean get() = ::configManager.isInitialized && ::auditLogger.isInitialized
     
     override fun register(plugin: GGvGPlugin) {
-        // Check if admin system is enabled
-        if (!plugin.config.getBoolean("admin.enabled", true)) {
-            plugin.logger.info("Admin configuration system is disabled")
-            return
-        }
+        // Initialize and register commands even if disabled; executors check the live flag.
+        // This keeps scoreboard status checks and shutdown safe after runtime toggles.
         
         // Initialize validator
         validator = ConfigValidator()
@@ -58,8 +56,9 @@ class AdminConfigModule(private val plugin: GGvGPlugin) : GGvGModule {
         moderationManager = ModerationManager(plugin, auditLogger)
         
         // Initialize permission manager
-        val useLuckPerms = plugin.config.getBoolean("admin.permissions.use-luckperms", true)
+        val useLuckPerms = plugin.config.getBoolean("admin.permissions.use-luckperms", false)
         permissionManager = PermissionManager(plugin, useLuckPerms)
+        Bukkit.getPluginManager().registerEvents(AdminModerationListener(plugin, moderationManager, permissionManager), plugin)
         
         // Initialize backup manager
         backupManager = BackupManager(plugin.dataFolder, plugin.logger)
@@ -75,7 +74,8 @@ class AdminConfigModule(private val plugin: GGvGPlugin) : GGvGModule {
             moderationManager,
             permissionManager,
             backupManager,
-            auditLogger
+            auditLogger,
+            scoreboardManagerProvider = { runCatching { plugin.scoreboard.manager }.getOrNull() }
         )
         plugin.getCommand("ggadmin")?.setExecutor(adminCommand)
         plugin.getCommand("ggadmin")?.tabCompleter = adminCommand
@@ -86,21 +86,22 @@ class AdminConfigModule(private val plugin: GGvGPlugin) : GGvGModule {
             auditLogger.cleanupOldEntries()
         }, 6000L, 6000L) // 5 minutes in ticks
         
-        // Schedule auto-backup task if enabled
-        if (autoBackup) {
-            val intervalTicks = (autoBackupInterval * 20).toLong() // Convert seconds to ticks
-            autoBackupTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(plugin, {
-                plugin.logger.info("Running automatic backup...")
-                val result = backupManager.createBackup(null, null, "Automatic backup")
-                result.onSuccess { info ->
-                    plugin.logger.info("Automatic backup created: ${info.name}")
-                }.onFailure { error ->
-                    plugin.logger.severe("Automatic backup failed: ${error.message}")
-                }
-            }, intervalTicks, intervalTicks)
-        }
+        // Keep the task scheduled so enabling admin/auto-backups at runtime takes effect.
+        val intervalTicks = autoBackupInterval.coerceAtLeast(60).toLong() * 20L
+        autoBackupTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(plugin, {
+            if (!plugin.config.getBoolean("admin.enabled", true) ||
+                !plugin.config.getBoolean("admin.backups.auto-backup", true) ||
+                !plugin.config.getBoolean("admin.backups.enabled", true)) return@scheduleSyncRepeatingTask
+            plugin.logger.info("Running automatic backup...")
+            val result = backupManager.createBackup(null, null, "Automatic backup")
+            result.onSuccess { info ->
+                plugin.logger.info("Automatic backup created: ${info.name}")
+            }.onFailure { error ->
+                plugin.logger.severe("Automatic backup failed: ${error.message}")
+            }
+        }, intervalTicks, intervalTicks)
         
-        plugin.logger.info("Admin configuration module enabled")
+        plugin.logger.info("Admin configuration module ${if (plugin.config.getBoolean("admin.enabled", true)) "enabled" else "disabled (managers initialized)"}")
     }
     
     /**
@@ -116,9 +117,10 @@ class AdminConfigModule(private val plugin: GGvGPlugin) : GGvGModule {
         }
         
         // Final cleanup
-        auditLogger.cleanupOldEntries()
+        if (::permissionManager.isInitialized) permissionManager.shutdown()
+        if (::auditLogger.isInitialized) auditLogger.cleanupOldEntries()
         
         // Save configuration
-        configManager.saveConfig()
+        if (::configManager.isInitialized) configManager.saveConfig()
     }
 }

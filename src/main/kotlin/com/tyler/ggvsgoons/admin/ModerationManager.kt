@@ -101,21 +101,20 @@ class ModerationManager(
             return Result.success(Unit)
         }
         
-        return Result.failure(IllegalStateException("Could not find captor"))
+        return Result.failure(IllegalStateException("Prisoner must be online before their game mode can be safely restored"))
     }
     
     /**
      * Reset all cooldowns for a player
      */
     fun resetCooldowns(playerId: UUID, adminId: UUID, adminName: String): Result<Unit> {
-        // This would reset cooldowns in various systems
-        // For now, we'll just log the action
+        plugin.teams.manager.resetSwitchCooldown(playerId)
         
         val action = ModerationAction(
             adminId = adminId,
             targetId = playerId,
             actionType = ModActionType.RESET_COOLDOWN,
-            reason = "Admin reset all cooldowns"
+            reason = "Admin reset team-switch cooldown"
         )
         val playerName = Bukkit.getOfflinePlayer(playerId).name ?: playerId.toString()
         auditLogger.logModAction(action, adminName, playerName, true)
@@ -129,9 +128,9 @@ class ModerationManager(
     fun kickFromTeam(playerId: UUID, adminId: UUID, adminName: String): Result<Unit> {
         val team = plugin.teams.manager.getPlayerTeam(playerId)
             ?: return Result.failure(IllegalArgumentException("Player is not on a team"))
-        
-        // Remove player from team by setting to empty string (removes from map)
-        plugin.teams.manager.setPlayerTeamSilently(playerId, "")
+
+        val removal = plugin.teams.manager.removePlayerFromTeam(playerId)
+        if (removal.isFailure) return removal
         
         // Log the action
         val action = ModerationAction(
@@ -153,46 +152,22 @@ class ModerationManager(
      * Kick a player from their faction
      */
     fun kickFromFaction(playerId: UUID, adminId: UUID, adminName: String): Result<Unit> {
-        // Check if factions module exists
-        try {
-            val factionsModuleClass = Class.forName("com.tyler.ggvsgoons.factions.FactionsModule")
-            val factionsModule = plugin.javaClass.getDeclaredField("factions").get(plugin)
-            val manager = factionsModuleClass.getDeclaredField("manager").get(factionsModule)
-            
-            // Use reflection to get faction and kick player
-            val getFactionMethod = manager.javaClass.getMethod("getFactionByPlayer", UUID::class.java)
-            val faction = getFactionMethod.invoke(manager, playerId)
-            
-            if (faction == null) {
-                return Result.failure(IllegalArgumentException("Player is not in a faction"))
-            }
-            
-            // Remove player from faction
-            val membersField = faction.javaClass.getDeclaredField("members")
-            membersField.isAccessible = true
-            @Suppress("UNCHECKED_CAST")
-            val members = membersField.get(faction) as MutableSet<UUID>
-            members.remove(playerId)
-            
-            // Log the action
-            val action = ModerationAction(
-                adminId = adminId,
-                targetId = playerId,
-                actionType = ModActionType.KICK_FROM_FACTION,
-                reason = "Admin kicked from faction"
-            )
-            val playerName = Bukkit.getOfflinePlayer(playerId).name ?: playerId.toString()
-            auditLogger.logModAction(action, adminName, playerName, true)
-            
-            // Notify player
-            Bukkit.getPlayer(playerId)?.sendMessage("§cYou have been removed from your faction by an administrator")
-            
-            return Result.success(Unit)
-        } catch (e: ClassNotFoundException) {
+        if (!plugin.factions.isRegistered) {
             return Result.failure(IllegalStateException("Factions module is not loaded"))
-        } catch (e: Exception) {
-            return Result.failure(e)
         }
+        val removal = plugin.factions.manager.forceRemoveMember(playerId)
+        if (removal.isFailure) return removal
+
+        val action = ModerationAction(
+            adminId = adminId,
+            targetId = playerId,
+            actionType = ModActionType.KICK_FROM_FACTION,
+            reason = "Admin kicked from faction"
+        )
+        val playerName = Bukkit.getOfflinePlayer(playerId).name ?: playerId.toString()
+        auditLogger.logModAction(action, adminName, playerName, true)
+        Bukkit.getPlayer(playerId)?.sendMessage("§cYou have been removed from your faction by an administrator")
+        return Result.success(Unit)
     }
     
     /**
@@ -204,26 +179,14 @@ class ModerationManager(
         val isPrisoner = plugin.warPrisoner.manager.isPrisoner(playerId)
         val isFrozen = isPlayerFrozen(playerId)
         
-        // Try to get faction info
-        var factionId: String? = null
-        try {
-            val factionsModuleClass = Class.forName("com.tyler.ggvsgoons.factions.FactionsModule")
-            val factionsModule = plugin.javaClass.getDeclaredField("factions").get(plugin)
-            val manager = factionsModuleClass.getDeclaredField("manager").get(factionsModule)
-            val getFactionMethod = manager.javaClass.getMethod("getFactionByPlayer", UUID::class.java)
-            val faction = getFactionMethod.invoke(manager, playerId)
-            if (faction != null) {
-                val idField = faction.javaClass.getDeclaredField("id")
-                idField.isAccessible = true
-                factionId = idField.get(faction) as String
-            }
-        } catch (e: Exception) {
-            // Factions not loaded or player not in faction
-        }
+        val factionId = if (plugin.factions.isRegistered) {
+            plugin.factions.manager.getFactionByPlayer(playerId)?.id
+        } else null
         
         val onlineSince = if (player.isOnline) {
             player.player?.let { System.currentTimeMillis() - (it.firstPlayed) }
         } else null
+        val stats = player.player?.let { plugin.stats.manager.getStats(it) }
         
         return PlayerInfo(
             playerId = playerId,
@@ -234,9 +197,9 @@ class ModerationManager(
             isFrozen = isFrozen,
             onlineSince = onlineSince,
             totalPlaytime = player.firstPlayed.let { System.currentTimeMillis() - it },
-            kills = 0, // Would need to track this
-            deaths = 0, // Would need to track this
-            prisonersCaptured = 0 // Would need to track this
+            kills = stats?.kills ?: 0,
+            deaths = stats?.deaths ?: 0,
+            prisonersCaptured = stats?.prisonersCaptured ?: 0
         )
     }
     
@@ -244,11 +207,9 @@ class ModerationManager(
      * Disable a command globally
      */
     fun disableCommand(command: String, reason: String? = null): Result<Unit> {
-        val restriction = commandRestrictions.getOrPut(command) {
-            CommandRestriction(command = command, disabled = false)
-        }
-        
-        commandRestrictions[command] = restriction.copy(disabled = true, reason = reason)
+        val key = resolveCommand(command).getOrElse { return Result.failure(it) }
+        val restriction = commandRestrictions[key] ?: CommandRestriction(command = key, disabled = false)
+        commandRestrictions[key] = restriction.copy(disabled = true, reason = reason)
         return Result.success(Unit)
     }
     
@@ -256,10 +217,11 @@ class ModerationManager(
      * Enable a command globally
      */
     fun enableCommand(command: String): Result<Unit> {
-        val restriction = commandRestrictions[command]
+        val key = resolveCommand(command).getOrElse { return Result.failure(it) }
+        val restriction = commandRestrictions[key]
             ?: return Result.failure(IllegalArgumentException("Command is not restricted"))
-        
-        commandRestrictions[command] = restriction.copy(disabled = false)
+        if (restriction.disabledFor.isEmpty()) commandRestrictions.remove(key)
+        else commandRestrictions[key] = restriction.copy(disabled = false, reason = null)
         return Result.success(Unit)
     }
     
@@ -267,12 +229,9 @@ class ModerationManager(
      * Disable a command for a specific player
      */
     fun disableCommandForPlayer(command: String, playerId: UUID, reason: String? = null): Result<Unit> {
-        val restriction = commandRestrictions.getOrPut(command) {
-            CommandRestriction(command = command, disabled = false)
-        }
-        
-        restriction.disabledFor.add(playerId)
-        commandRestrictions[command] = restriction.copy(reason = reason)
+        val key = resolveCommand(command).getOrElse { return Result.failure(it) }
+        val restriction = commandRestrictions[key] ?: CommandRestriction(command = key, disabled = false)
+        commandRestrictions[key] = restriction.copy(disabledFor = (restriction.disabledFor + playerId).toMutableSet(), reason = reason)
         return Result.success(Unit)
     }
     
@@ -280,10 +239,13 @@ class ModerationManager(
      * Enable a command for a specific player
      */
     fun enableCommandForPlayer(command: String, playerId: UUID): Result<Unit> {
-        val restriction = commandRestrictions[command]
+        val key = resolveCommand(command).getOrElse { return Result.failure(it) }
+        val restriction = commandRestrictions[key]
             ?: return Result.failure(IllegalArgumentException("Command is not restricted"))
-        
-        restriction.disabledFor.remove(playerId)
+        if (playerId !in restriction.disabledFor) return Result.failure(IllegalArgumentException("Command is not restricted for this player"))
+        val remaining = (restriction.disabledFor - playerId).toMutableSet()
+        if (remaining.isEmpty() && !restriction.disabled) commandRestrictions.remove(key)
+        else commandRestrictions[key] = restriction.copy(disabledFor = remaining)
         return Result.success(Unit)
     }
     
@@ -291,15 +253,28 @@ class ModerationManager(
      * Check if a command is disabled for a player
      */
     fun isCommandDisabled(command: String, playerId: UUID): Boolean {
-        val restriction = commandRestrictions[command] ?: return false
+        val key = resolveCommand(command).getOrNull() ?: return false
+        val restriction = commandRestrictions[key] ?: return false
         return restriction.disabled || restriction.disabledFor.contains(playerId)
+    }
+
+    /** Resolve aliases and namespaced labels to this plugin's registered command. */
+    fun resolveCommand(command: String): Result<String> {
+        val label = command.trim().removePrefix("/").lowercase()
+        val key = if (':' in label && label.substringBefore(':') == plugin.name.lowercase()) label.substringAfter(':') else label
+        val registered = plugin.getCommand(key)
+            ?: return Result.failure(IllegalArgumentException("Only registered GGvGoons commands can be restricted: $command"))
+        if (registered.name.equals("ggadmin", ignoreCase = true)) {
+            return Result.failure(IllegalArgumentException("The admin command cannot be restricted (recovery access)"))
+        }
+        return Result.success(registered.name.lowercase())
     }
     
     /**
      * Get command restriction
      */
     fun getCommandRestriction(command: String): CommandRestriction? {
-        return commandRestrictions[command]
+        return resolveCommand(command).getOrNull()?.let { commandRestrictions[it] }
     }
     
     /**

@@ -8,8 +8,7 @@ import org.bukkit.scheduler.BukkitTask
 import java.util.UUID
 
 /**
- * captorId -> targetId, while an offer is awaiting accept/decline
- * zaidyn is gay
+ * An offer is keyed by its target ID while awaiting accept/decline.
  */
 data class PendingOffer(val captorId: UUID, val targetId: UUID, val issuedAtMillis: Long = System.currentTimeMillis())
 
@@ -46,15 +45,20 @@ class PrisonerManager(private val plugin: GGvGPlugin, private val offerExpirySec
         
         // Restore Adventure mode for any prisoners who are online
         loadedPrisoners.keys.forEach { prisonerId ->
-            plugin.server.getPlayer(prisonerId)?.let { player ->
-                player.gameMode = GameMode.ADVENTURE
-                player.sendMessage("${ChatColor.GOLD}You are still a war prisoner from before the server restart.")
-            }
+            plugin.server.getPlayer(prisonerId)?.let { enforcePrisonerState(it) }
         }
     }
 
+    fun enforcePrisonerState(player: Player) {
+        if (!isPrisoner(player.uniqueId)) return
+        player.gameMode = GameMode.ADVENTURE
+        player.sendMessage("${ChatColor.GOLD}You are still a war prisoner.")
+    }
+
     fun createOffer(captor: Player, target: Player): Boolean {
-        if (isPrisoner(target.uniqueId) || hasPendingOffer(target.uniqueId)) return false
+        if (captor.uniqueId == target.uniqueId || isPrisoner(captor.uniqueId) ||
+            isPrisoner(target.uniqueId) || hasPendingOffer(target.uniqueId) ||
+            !plugin.teams.manager.areOpposingTeams(captor.uniqueId, target.uniqueId)) return false
         pendingOffers[target.uniqueId] = PendingOffer(captor.uniqueId, target.uniqueId)
         
         // Schedule expiry task if timeout is configured
@@ -73,6 +77,11 @@ class PrisonerManager(private val plugin: GGvGPlugin, private val offerExpirySec
     fun consumeOffer(targetId: UUID, expectedCaptorId: UUID): UUID? {
         val offer = pendingOffers[targetId] ?: return null
         if (offer.captorId != expectedCaptorId) return null
+        if (offerExpirySeconds > 0 &&
+            System.currentTimeMillis() - offer.issuedAtMillis >= offerExpirySeconds * 1000L) {
+            clearOffer(targetId)
+            return null
+        }
         pendingOffers.remove(targetId)
         
         // Cancel the expiry task since offer was consumed
@@ -81,9 +90,30 @@ class PrisonerManager(private val plugin: GGvGPlugin, private val offerExpirySec
         return offer.captorId
     }
 
+    /** Accept only if the offer and opposing-team relationship are still valid right now. */
+    fun acceptOffer(target: Player, expectedCaptorId: UUID): Player? {
+        val offer = pendingOffers[target.uniqueId] ?: return null
+        if (offer.captorId != expectedCaptorId) return null
+        val captor = plugin.server.getPlayer(expectedCaptorId)
+        if (captor == null || !captor.isOnline || !target.isOnline ||
+            isPrisoner(captor.uniqueId) || isPrisoner(target.uniqueId) ||
+            !plugin.teams.manager.areOpposingTeams(captor.uniqueId, target.uniqueId)) {
+            clearOffer(target.uniqueId)
+            return null
+        }
+        if (consumeOffer(target.uniqueId, expectedCaptorId) == null) return null
+        if (!takePrisoner(target, captor)) return null
+        return captor
+    }
+
     fun clearOffer(targetId: UUID) {
         pendingOffers.remove(targetId)
         expiryTasks.remove(targetId)?.cancel()
+    }
+
+    fun clearOffersForPlayer(playerId: UUID) {
+        pendingOffers.values.filter { it.targetId == playerId || it.captorId == playerId }
+            .forEach { clearOffer(it.targetId) }
     }
 
     /**
@@ -102,22 +132,32 @@ class PrisonerManager(private val plugin: GGvGPlugin, private val offerExpirySec
         }
     }
 
-    fun takePrisoner(target: Player, captor: Player) {
-        prisoners[target.uniqueId] = Prisoner(captor.uniqueId, target.gameMode)
-        target.gameMode = GameMode.ADVENTURE
+    private fun takePrisoner(target: Player, captor: Player): Boolean {
+        val previousMode = target.gameMode
+        prisoners[target.uniqueId] = Prisoner(captor.uniqueId, previousMode)
+        val switched = runCatching {
+            target.gameMode = GameMode.ADVENTURE
+            target.gameMode == GameMode.ADVENTURE
+        }.getOrDefault(false)
+        if (!switched) {
+            prisoners.remove(target.uniqueId)
+            return false
+        }
+        plugin.stats.manager.addPrisonerCaptured(captor)
+        return true
     }
 
     /** Restores the prisoner's original gamemode and clears their state. Returns false if they weren't a prisoner. */
     fun releasePrisoner(playerId: UUID): Boolean {
-        val prisoner = prisoners.remove(playerId) ?: return false
-        val player = plugin.server.getPlayer(playerId)
-        player?.gameMode = prisoner.previousGameMode
-        return true
-    }
-
-    /** For the captor choosing to execute rather than free — just clears the tracked state, doesn't kill the player itself */
-    fun clearPrisonerState(playerId: UUID) {
+        val prisoner = prisoners[playerId] ?: return false
+        val player = plugin.server.getPlayer(playerId) ?: return false
+        val restored = runCatching {
+            player.gameMode = prisoner.previousGameMode
+            player.gameMode == prisoner.previousGameMode
+        }.getOrDefault(false)
+        if (!restored) return false
         prisoners.remove(playerId)
+        return true
     }
 
     /**

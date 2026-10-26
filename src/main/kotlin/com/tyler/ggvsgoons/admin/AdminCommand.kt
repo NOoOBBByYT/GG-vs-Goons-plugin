@@ -8,6 +8,7 @@ import org.bukkit.command.CommandExecutor
 import org.bukkit.command.CommandSender
 import org.bukkit.command.TabCompleter
 import org.bukkit.entity.Player
+import com.tyler.ggvsgoons.scoreboard.ScoreboardManager
 import java.io.File
 
 /**
@@ -19,7 +20,8 @@ class AdminCommand(
     private val moderationManager: ModerationManager,
     private val permissionManager: PermissionManager,
     private val backupManager: BackupManager,
-    private val auditLogger: AuditLogger
+    private val auditLogger: AuditLogger,
+    private val scoreboardManagerProvider: () -> ScoreboardManager? = { null }
 ) : CommandExecutor, TabCompleter {
     
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
@@ -47,6 +49,8 @@ class AdminCommand(
             "permission", "perm" -> handlePermission(sender, args)
             "player" -> handlePlayer(sender, args)
             "stats" -> handleStats(sender, args)
+            "scoreboard" -> handleScoreboard(sender, args)
+            "tablist" -> handleTabList(sender, args)
             "audit" -> handleAudit(sender, args)
             "backup" -> handleBackup(sender, args)
             "help" -> sendHelp(sender)
@@ -100,6 +104,9 @@ class AdminCommand(
                 val result = configManager.disableModule(moduleName, adminId, sender.name)
                 result.onSuccess {
                     sender.sendMessage("${ChatColor.GREEN}Disabled module: $moduleName")
+                    if (moduleName.equals("admin", ignoreCase = true)) {
+                        sender.sendMessage("${ChatColor.YELLOW}Admin commands are now unavailable. Re-enable admin.enabled in config.yml and restart the server to restore access.")
+                    }
                 }.onFailure { error ->
                     sender.sendMessage("${ChatColor.RED}${error.message}")
                 }
@@ -371,6 +378,10 @@ class AdminCommand(
                 val playerName = args[2]
                 val permission = args[3]
                 val target = Bukkit.getOfflinePlayer(playerName)
+                if (!target.isOnline) {
+                    sender.sendMessage("${ChatColor.RED}Effective permissions can only be checked for online players")
+                    return
+                }
                 val has = permissionManager.checkPermission(target.uniqueId, permission)
                 sender.sendMessage("${ChatColor.YELLOW}$playerName ${if (has) "${ChatColor.GREEN}has" else "${ChatColor.RED}does not have"} ${ChatColor.YELLOW}permission: $permission")
             }
@@ -382,7 +393,7 @@ class AdminCommand(
                 val playerName = args[2]
                 val target = Bukkit.getOfflinePlayer(playerName)
                 val permissions = permissionManager.listPermissions(target.uniqueId)
-                sender.sendMessage("${ChatColor.GOLD}${ChatColor.BOLD}=== Permissions for $playerName ===")
+                sender.sendMessage("${ChatColor.GOLD}${ChatColor.BOLD}=== This plugin's runtime grants for $playerName ===")
                 if (permissions.isEmpty()) {
                     sender.sendMessage("${ChatColor.GRAY}No custom permissions")
                 } else {
@@ -461,7 +472,7 @@ class AdminCommand(
                 val adminId = if (sender is Player) sender.uniqueId else java.util.UUID.randomUUID()
                 val result = moderationManager.resetCooldowns(target.uniqueId, adminId, sender.name)
                 result.onSuccess {
-                    sender.sendMessage("${ChatColor.GREEN}Reset cooldowns for: $playerName")
+                    sender.sendMessage("${ChatColor.GREEN}Reset team-switch cooldown for: $playerName")
                 }.onFailure { error ->
                     sender.sendMessage("${ChatColor.RED}${error.message}")
                 }
@@ -510,8 +521,10 @@ class AdminCommand(
                 sender.sendMessage("${ChatColor.YELLOW}Faction: ${ChatColor.WHITE}${info.factionId ?: "None"}")
                 sender.sendMessage("${ChatColor.YELLOW}Prisoner: ${if (info.isPrisoner) "${ChatColor.RED}Yes" else "${ChatColor.GREEN}No"}")
                 sender.sendMessage("${ChatColor.YELLOW}Frozen: ${if (info.isFrozen) "${ChatColor.RED}Yes" else "${ChatColor.GREEN}No"}")
-                sender.sendMessage("${ChatColor.YELLOW}K/D: ${ChatColor.WHITE}${info.kills}/${info.deaths}")
-                sender.sendMessage("${ChatColor.YELLOW}Prisoners Captured: ${ChatColor.WHITE}${info.prisonersCaptured}")
+                if (target.isOnline) {
+                    sender.sendMessage("${ChatColor.YELLOW}K/D: ${ChatColor.WHITE}${info.kills}/${info.deaths}")
+                    sender.sendMessage("${ChatColor.YELLOW}Prisoners Captured: ${ChatColor.WHITE}${info.prisonersCaptured}")
+                } else sender.sendMessage("${ChatColor.GRAY}Statistics require the player to be online")
             }
         }
     }
@@ -643,8 +656,8 @@ class AdminCommand(
                 sender.sendMessage("${ChatColor.YELLOW}Restoring backup: $name...")
                 val result = backupManager.restoreBackup(name)
                 result.onSuccess {
-                    sender.sendMessage("${ChatColor.GREEN}Backup restored successfully")
-                    sender.sendMessage("${ChatColor.YELLOW}Please reload the server for changes to take effect")
+                    sender.sendMessage("${ChatColor.GREEN}Backup validated and queued for restore")
+                    sender.sendMessage("${ChatColor.YELLOW}Fully stop and restart the server to apply it before plugin data loads. Do not use /reload.")
                 }.onFailure { error ->
                     sender.sendMessage("${ChatColor.RED}Failed to restore backup: ${error.message}")
                 }
@@ -665,6 +678,51 @@ class AdminCommand(
         }
     }
     
+    private fun handleScoreboard(sender: CommandSender, args: Array<out String>) {
+        if (!sender.hasPermission("ggvgoons.scoreboard.admin")) {
+            sender.sendMessage("${ChatColor.RED}You don't have permission to manage the scoreboard")
+            return
+        }
+        val manager = scoreboardManagerProvider() ?: run {
+            sender.sendMessage("${ChatColor.RED}Scoreboard module is not available.")
+            return
+        }
+        when (args.getOrNull(1)?.lowercase()) {
+            "reload" -> { plugin.reloadConfig(); manager.reload(); sender.sendMessage("${ChatColor.GREEN}Scoreboard configuration reloaded.") }
+            "toggle" -> {
+                val enabled = plugin.config.getBoolean("scoreboard.enabled", true)
+                plugin.config.set("scoreboard.enabled", !enabled)
+                plugin.saveConfig()
+                manager.reload()
+                sender.sendMessage("${ChatColor.GREEN}Scoreboard globally ${if (!enabled) "enabled" else "disabled"}.")
+            }
+            "update" -> { manager.forceUpdateAll(); sender.sendMessage("${ChatColor.GREEN}All scoreboards updated.") }
+            else -> sender.sendMessage("${ChatColor.RED}Usage: /ggadmin scoreboard <reload|toggle|update>")
+        }
+    }
+
+    private fun handleTabList(sender: CommandSender, args: Array<out String>) {
+        if (!sender.hasPermission("ggvgoons.tablist.admin")) {
+            sender.sendMessage("${ChatColor.RED}You don't have permission to manage the tab list")
+            return
+        }
+        val manager = scoreboardManagerProvider() ?: run {
+            sender.sendMessage("${ChatColor.RED}Scoreboard module is not available.")
+            return
+        }
+        when (args.getOrNull(1)?.lowercase()) {
+            "reload" -> { plugin.reloadConfig(); manager.reload(); sender.sendMessage("${ChatColor.GREEN}Tab list configuration reloaded.") }
+            "toggle" -> {
+                val enabled = plugin.config.getBoolean("tablist.enabled", true)
+                plugin.config.set("tablist.enabled", !enabled)
+                plugin.saveConfig()
+                manager.reload()
+                sender.sendMessage("${ChatColor.GREEN}Tab list globally ${if (!enabled) "enabled" else "disabled"}.")
+            }
+            else -> sender.sendMessage("${ChatColor.RED}Usage: /ggadmin tablist <reload|toggle>")
+        }
+    }
+
     private fun sendHelp(sender: CommandSender) {
         sender.sendMessage("${ChatColor.GOLD}${ChatColor.BOLD}=== GGvGoons Admin Commands ===")
         sender.sendMessage("${ChatColor.YELLOW}/ggadmin module <list|enable|disable|reload|info> ${ChatColor.GRAY}- Manage modules")
@@ -673,6 +731,8 @@ class AdminCommand(
         sender.sendMessage("${ChatColor.YELLOW}/ggadmin permission <grant|revoke|check|list> ${ChatColor.GRAY}- Manage permissions")
         sender.sendMessage("${ChatColor.YELLOW}/ggadmin player <freeze|unfreeze|info|etc> ${ChatColor.GRAY}- Moderate players")
         sender.sendMessage("${ChatColor.YELLOW}/ggadmin stats <server|module|player|team> ${ChatColor.GRAY}- View statistics")
+        sender.sendMessage("${ChatColor.YELLOW}/ggadmin scoreboard <reload|toggle|update> ${ChatColor.GRAY}- Manage scoreboard")
+        sender.sendMessage("${ChatColor.YELLOW}/ggadmin tablist <reload|toggle> ${ChatColor.GRAY}- Manage tab list")
         sender.sendMessage("${ChatColor.YELLOW}/ggadmin audit <view|search|export> ${ChatColor.GRAY}- View audit logs")
         sender.sendMessage("${ChatColor.YELLOW}/ggadmin backup <create|list|restore|delete> ${ChatColor.GRAY}- Manage backups")
     }
@@ -681,7 +741,7 @@ class AdminCommand(
         if (!sender.hasPermission("ggvgoons.admin.use")) return null
         
         return when (args.size) {
-            1 -> listOf("module", "config", "command", "permission", "player", "stats", "audit", "backup", "help")
+            1 -> listOf("module", "config", "command", "permission", "player", "stats", "scoreboard", "tablist", "audit", "backup", "help")
                 .filter { it.startsWith(args[0].lowercase()) }
             
             2 -> when (args[0].lowercase()) {
@@ -693,13 +753,15 @@ class AdminCommand(
                 "stats" -> listOf("server", "module", "player", "team")
                 "audit" -> listOf("view", "search", "export")
                 "backup" -> listOf("create", "list", "restore", "delete")
+                "scoreboard" -> listOf("reload", "toggle", "update")
+                "tablist" -> listOf("reload", "toggle")
                 else -> null
             }?.filter { it.startsWith(args[1].lowercase()) }
             
             3 -> when (args[0].lowercase()) {
                 "module" -> when (args[1].lowercase()) {
                     "enable", "disable", "reload", "info" ->
-                        listOf("warprisoner", "teams", "factions", "admin", "discord")
+                        listOf("warprisoner", "teams", "factions", "admin")
                             .filter { it.startsWith(args[2].lowercase()) }
                     else -> null
                 }

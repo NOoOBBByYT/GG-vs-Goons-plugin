@@ -4,15 +4,16 @@ import com.tyler.ggvsgoons.GGvGModule
 import com.tyler.ggvsgoons.GGvGPlugin
 import com.tyler.ggvsgoons.persistence.TeamPersistence
 import net.md_5.bungee.api.ChatColor
+import org.bukkit.Bukkit
+import org.bukkit.entity.Player
 import org.bukkit.event.EventHandler
 import org.bukkit.event.Listener
 import org.bukkit.event.player.AsyncPlayerChatEvent
 import org.bukkit.event.player.PlayerJoinEvent
+import org.bukkit.event.EventPriority
 
 /**
- * Phase 2 entry point. Follows the same GGvGModule pattern as WarPrisonerModule —
- * self-contained, exposes `manager` publicly for cross-module access (used by the
- * prisoner system for team validation, see Step 5 in the plan).
+ * Team module. Exposes its manager for cross-module membership checks.
  */
 class TeamsModule(private val plugin: GGvGPlugin) : GGvGModule, Listener {
 
@@ -40,34 +41,40 @@ class TeamsModule(private val plugin: GGvGPlugin) : GGvGModule, Listener {
         manager.restoreScoreboardEntry(event.player)
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun onChat(event: AsyncPlayerChatEvent) {
-        // Support @team prefix for quick team chat
         val message = event.message
         if (!message.startsWith("@team ")) return
-        
-        if (!plugin.config.getBoolean("teams.chat.enabled", true)) {
-            event.player.sendMessage("${ChatColor.RED}Team chat is disabled.")
-            event.isCancelled = true
-            return
-        }
-
         event.isCancelled = true
+        val player = event.player
         val teamMessage = message.substring(6).trim()
-        
-        if (teamMessage.isEmpty()) {
-            event.player.sendMessage("${ChatColor.RED}Usage: @team <message>")
+        if (event.isAsynchronous) {
+            Bukkit.getScheduler().runTask(plugin, Runnable { sendTeamChat(player, teamMessage) })
+        } else {
+            sendTeamChat(player, teamMessage)
+        }
+    }
+
+    private fun sendTeamChat(player: Player, teamMessage: String) {
+        if (!player.isOnline) return
+        if (!plugin.config.getBoolean("teams.chat.enabled", true)) {
+            player.sendMessage("${ChatColor.RED}Team chat is disabled.")
             return
         }
 
-        val senderTeam = manager.getPlayerTeam(event.player.uniqueId)
+        if (teamMessage.isEmpty()) {
+            player.sendMessage("${ChatColor.RED}Usage: @team <message>")
+            return
+        }
+
+        val senderTeam = manager.getPlayerTeam(player.uniqueId)
         if (senderTeam == null) {
-            event.player.sendMessage("${ChatColor.RED}You're not on a team.")
+            player.sendMessage("${ChatColor.RED}You're not on a team.")
             return
         }
 
         val prefix = plugin.config.getString("teams.chat.prefix", "[TEAM] ") ?: "[TEAM] "
-        val formatted = "$prefix${senderTeam.displayName}${ChatColor.RESET} ${event.player.name}: $teamMessage"
+        val formatted = "$prefix${senderTeam.displayName}${ChatColor.RESET} ${player.name}: $teamMessage"
 
         // Send to all team members
         manager.getTeamMembers(senderTeam.id).forEach { uuid ->

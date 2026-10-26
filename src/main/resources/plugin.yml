@@ -20,7 +20,7 @@ commands:
     usage: /<command> <player>
     permission: ggvgoons.warprisoner.free
   executeprisoner:
-    description: Execute your war prisoner
+    description: End your prisoner's captivity without killing them
     usage: /<command> <player>
     permission: ggvgoons.warprisoner.execute
   listprisoners:
@@ -33,7 +33,7 @@ commands:
     permission: ggvgoons.team.use
   faction:
     description: Faction management commands
-    usage: /<command> <create|disband|info|list|invite|kick|etc> [args]
+    usage: /<command> <create|disband|info|list|invite|kick|accept|decline|promote|demote|transfer|leave|home|sethome|chat> [args]
     aliases: [f, fac]
     permission: ggvgoons.faction.use
   fc:
@@ -41,6 +41,10 @@ commands:
     usage: /<command> <message>
     aliases: [factionchat]
     permission: ggvgoons.faction.chat
+  scoreboard:
+    description: Toggle your personal scoreboard
+    usage: /<command> [toggle]
+    permission: ggvgoons.scoreboard.toggle
   ggadmin:
     description: Admin configuration and moderation commands
     usage: /<command> <subcommand> [args]
@@ -80,6 +84,15 @@ permissions:
     default: true
   ggvgoons.faction.admin:
     description: Admin faction commands
+    default: op
+  ggvgoons.scoreboard.toggle:
+    description: Toggle personal scoreboard
+    default: true
+  ggvgoons.scoreboard.admin:
+    description: Admin scoreboard commands
+    default: op
+  ggvgoons.tablist.admin:
+    description: Admin tab list commands
     default: op
   ggvgoons.admin.use:
     description: Access to admin commands

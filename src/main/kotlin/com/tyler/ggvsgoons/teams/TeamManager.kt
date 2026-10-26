@@ -19,8 +19,8 @@ import java.util.concurrent.ConcurrentHashMap
 class TeamManager(private val plugin: GGvGPlugin) {
 
     val teams: MutableMap<String, Team> = mutableMapOf(
-        "gg" to Team("gg", "GG", "GG", BukkitChatColor.BLUE),
-        "goons" to Team("goons", "Goons", "Goons", BukkitChatColor.RED)
+        "gg" to Team("gg", "GG", "GG", BukkitChatColor.GOLD),
+        "goons" to Team("goons", "Goons", "Goons", BukkitChatColor.DARK_BLUE)
     )
 
     // player UUID -> team id ("gg" / "goons")
@@ -28,6 +28,11 @@ class TeamManager(private val plugin: GGvGPlugin) {
 
     // player UUID -> millis timestamp of their last team switch (for the cooldown)
     private val lastSwitch = ConcurrentHashMap<UUID, Long>()
+
+    /** Clear the only currently implemented gameplay cooldown. */
+    fun resetSwitchCooldown(playerId: UUID) {
+        lastSwitch.remove(playerId)
+    }
 
     private val scoreboard: Scoreboard?
         get() = Bukkit.getScoreboardManager()?.mainScoreboard
@@ -47,17 +52,40 @@ class TeamManager(private val plugin: GGvGPlugin) {
         }
     }
 
+    /** A personal sidebar has its own scoreboard, so copy the main scoreboard's team entries. */
+    fun mirrorTeamsTo(board: Scoreboard) {
+        val main = scoreboard ?: return
+        if (board === main) return
+        for (team in teams.values) {
+            val source = main.getTeam(team.bukkitName) ?: continue
+            val target = board.getTeam(team.bukkitName) ?: board.registerNewTeam(team.bukkitName)
+            target.color = source.color
+            target.setAllowFriendlyFire(source.allowFriendlyFire())
+            target.setOption(BukkitTeam.Option.NAME_TAG_VISIBILITY, source.getOption(BukkitTeam.Option.NAME_TAG_VISIBILITY))
+            (target.entries - source.entries).forEach { target.removeEntry(it) }
+            (source.entries - target.entries).forEach { target.addEntry(it) }
+        }
+    }
+
+    private fun notifyScoreboardChanged() {
+        runCatching { plugin.scoreboard.manager }.getOrNull()?.syncTeams()
+    }
+
     /** Re-adds a player's Bukkit scoreboard entry after they (re)join, based on their saved team.
      *  Needed because teams.yml remembers membership, but the Bukkit scoreboard itself does not
      *  persist across restarts. */
     fun restoreScoreboardEntry(player: Player) {
-        val team = getPlayerTeam(player.uniqueId) ?: return
-        scoreboard?.getTeam(team.bukkitName)?.addEntry(player.name)
+        // An admin may have removed an offline member while their old scoreboard entry remained.
+        scoreboard?.getEntryTeam(player.name)?.removeEntry(player.name)
+        val team = getPlayerTeam(player.uniqueId)
+        if (team != null) scoreboard?.getTeam(team.bukkitName)?.addEntry(player.name)
+        notifyScoreboardChanged()
     }
 
     fun joinTeam(player: Player, teamId: String): Boolean {
         val id = teamId.lowercase()
         val team = teams[id] ?: return false
+        if (playerTeams[player.uniqueId] == id) return false
 
         val allowSwitching = plugin.config.getBoolean("teams.allow-team-switching", true)
         if (!allowSwitching && playerTeams.containsKey(player.uniqueId)) {
@@ -78,12 +106,19 @@ class TeamManager(private val plugin: GGvGPlugin) {
             }
         }
 
+        val factionResult = detachFaction(player.uniqueId)
+        if (factionResult.isFailure) {
+            player.sendMessage("${ChatColor.RED}${factionResult.exceptionOrNull()?.message}")
+            return false
+        }
+
         // Pull them off whatever Bukkit team they're currently in (handles switching sides)
         scoreboard?.getEntryTeam(player.name)?.removeEntry(player.name)
 
         playerTeams[player.uniqueId] = id
         lastSwitch[player.uniqueId] = System.currentTimeMillis()
         scoreboard?.getTeam(team.bukkitName)?.addEntry(player.name)
+        notifyScoreboardChanged()
 
         return true
     }
@@ -92,14 +127,34 @@ class TeamManager(private val plugin: GGvGPlugin) {
      *  Skips cooldowns and doesn't touch the scoreboard directly (the player isn't online yet;
      *  restoreScoreboardEntry() handles that when they join). */
     fun setPlayerTeamSilently(uuid: UUID, teamId: String) {
-        if (teamId in teams) playerTeams[uuid] = teamId
+        require(teamId in teams) { "Unknown team id $teamId" }
+        playerTeams[uuid] = teamId
     }
 
     fun leaveTeam(player: Player): Boolean {
-        val had = playerTeams.remove(player.uniqueId) != null
-        if (had) scoreboard?.getEntryTeam(player.name)?.removeEntry(player.name)
-        return had
+        val result = removePlayerFromTeam(player.uniqueId)
+        if (result.isFailure) player.sendMessage("${ChatColor.RED}${result.exceptionOrNull()?.message}")
+        return result.isSuccess
     }
+
+    /** Remove an online or offline player without leaving a stale faction or scoreboard entry. */
+    fun removePlayerFromTeam(playerId: UUID): Result<Unit> {
+        if (!playerTeams.containsKey(playerId)) {
+            return Result.failure(IllegalStateException("Player is not on a team"))
+        }
+        val factionResult = detachFaction(playerId)
+        if (factionResult.isFailure) return factionResult
+        playerTeams.remove(playerId)
+        plugin.server.getPlayer(playerId)?.let { player ->
+            scoreboard?.getEntryTeam(player.name)?.removeEntry(player.name)
+        }
+        notifyScoreboardChanged()
+        return Result.success(Unit)
+    }
+
+    private fun detachFaction(playerId: UUID): Result<Unit> =
+        if (plugin.factions.isRegistered) plugin.factions.manager.removeMemberForTeamChange(playerId)
+        else Result.success(Unit)
 
     fun getPlayerTeam(playerId: UUID): Team? = playerTeams[playerId]?.let { teams[it] }
 

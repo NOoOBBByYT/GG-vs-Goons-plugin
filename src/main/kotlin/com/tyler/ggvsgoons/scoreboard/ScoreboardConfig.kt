@@ -11,7 +11,10 @@ data class ScoreboardConfig(
     val updateInterval: Int,
     val elements: ScoreboardElements,
     val labels: ScoreboardLabels,
-    val colors: ScoreboardColors
+    val colors: ScoreboardColors,
+    val enabledWorlds: List<String> = emptyList(),
+    val hideInCombat: Boolean = false,
+    val hideWhenPrisoner: Boolean = false
 )
 
 /**
@@ -28,6 +31,7 @@ data class ScoreboardElements(
     val playerStatus: Boolean,
     val onlinePlayers: Boolean,
     val teamOnline: Boolean,
+    val teamPrisoners: Boolean,
     val tps: Boolean,
     val currentTime: Boolean
 )
@@ -44,7 +48,8 @@ data class ScoreboardLabels(
     val prisoners: String,
     val status: String,
     val online: String,
-    val teamOnline: String
+    val teamOnline: String,
+    val teamPrisoners: String
 )
 
 /**
@@ -71,7 +76,6 @@ data class TabListConfig(
     val footer: String,
     val teamHeaders: Map<String, String>,
     val playerFormat: PlayerFormat,
-    val sortOrder: String,
     val ping: PingConfig
 )
 
@@ -94,17 +98,3 @@ data class PingConfig(
     val format: String,
     val colors: Map<String, ChatColor>
 )
-
-/**
- * Player statistics for scoreboard display
- */
-data class PlayerStats(
-    val kills: Int = 0,
-    val deaths: Int = 0,
-    val prisonersCaptured: Int = 0
-) {
-    fun getKDR(): Double {
-        return if (deaths == 0) kills.toDouble()
-        else kills.toDouble() / deaths.toDouble()
-    }
-}

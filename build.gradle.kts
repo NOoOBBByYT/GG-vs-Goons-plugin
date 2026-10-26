@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.tyler.ggvsgoons"
-version = "1.0.0"
+version = "1.2.0"
 
 repositories {
     mavenCentral()
@@ -13,10 +13,18 @@ repositories {
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:1.21.1-R0.1-SNAPSHOT")
+    testImplementation(kotlin("test-junit5"))
+    testImplementation("io.papermc.paper:paper-api:1.21.1-R0.1-SNAPSHOT")
+    testImplementation("org.mockito:mockito-core:5.14.2")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 kotlin {
     jvmToolchain(21)
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 tasks.processResources {

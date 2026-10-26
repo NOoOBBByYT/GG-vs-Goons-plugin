@@ -36,6 +36,9 @@ class FactionManager(private val plugin: GGvGPlugin) {
      * Create a new faction
      */
     fun createFaction(name: String, leaderId: UUID, teamId: String): Result<Faction> {
+        if (plugin.teams.manager.getPlayerTeam(leaderId)?.id != teamId) {
+            return Result.failure(IllegalStateException("Faction leader must belong to the faction's team"))
+        }
         // Validate faction name
         if (name.length < 3 || name.length > 16) {
             return Result.failure(IllegalArgumentException("Faction name must be between 3 and 16 characters"))
@@ -158,12 +161,9 @@ class FactionManager(private val plugin: GGvGPlugin) {
         }
         
         // Check if invitee is on the same team
-        val inviteePlayer = Bukkit.getPlayer(inviteeId)
-        if (inviteePlayer != null) {
-            val inviteeTeam = plugin.teams.manager.getPlayerTeam(inviteeId)
-            if (inviteeTeam?.id != faction.teamId) {
-                return Result.failure(IllegalStateException("Player must be on the same team"))
-            }
+        if (plugin.teams.manager.getPlayerTeam(inviterId)?.id != faction.teamId ||
+            plugin.teams.manager.getPlayerTeam(inviteeId)?.id != faction.teamId) {
+            return Result.failure(IllegalStateException("Both players must be on the faction's team"))
         }
         
         // Check if invite already exists
@@ -180,7 +180,7 @@ class FactionManager(private val plugin: GGvGPlugin) {
             factionId = factionId,
             inviterId = inviterId,
             inviteeId = inviteeId,
-            expiresAt = System.currentTimeMillis() + (inviteExpirySeconds * 1000)
+            expiresAt = System.currentTimeMillis() + (inviteExpirySeconds * 1000L)
         )
         
         existingInvites.add(invite)
@@ -188,7 +188,7 @@ class FactionManager(private val plugin: GGvGPlugin) {
         // Schedule invite expiry
         Bukkit.getScheduler().runTaskLater(plugin, Runnable {
             existingInvites.remove(invite)
-        }, (inviteExpirySeconds * 20).toLong())
+        }, inviteExpirySeconds * 20L)
         
         return Result.success(invite)
     }
@@ -205,6 +205,15 @@ class FactionManager(private val plugin: GGvGPlugin) {
         
         val faction = factions[factionId]
             ?: return Result.failure(IllegalArgumentException("Faction no longer exists"))
+        if (plugin.teams.manager.getPlayerTeam(playerId)?.id != faction.teamId) {
+            invites.remove(invite)
+            return Result.failure(IllegalStateException("You must still be on the faction's team"))
+        }
+        if (faction.getRole(invite.inviterId)?.canInvite() != true ||
+            plugin.teams.manager.getPlayerTeam(invite.inviterId)?.id != faction.teamId) {
+            invites.remove(invite)
+            return Result.failure(IllegalStateException("The player who invited you can no longer invite"))
+        }
         
         // Check if player is already in a faction
         if (playerFactions.containsKey(playerId)) {
@@ -279,9 +288,7 @@ class FactionManager(private val plugin: GGvGPlugin) {
         }
         
         // Remove member
-        faction.members.remove(targetId)
-        faction.officers.remove(targetId)
-        playerFactions.remove(targetId)
+        removeMember(faction, targetId)
         
         return Result.success(Unit)
     }
@@ -302,11 +309,39 @@ class FactionManager(private val plugin: GGvGPlugin) {
         }
         
         // Remove member
-        faction.members.remove(playerId)
-        faction.officers.remove(playerId)
-        playerFactions.remove(playerId)
+        removeMember(faction, playerId)
         
         return Result.success(Unit)
+    }
+
+    /** Also used by admin removals and team changes to update both membership indexes. */
+    fun removeMemberForTeamChange(playerId: UUID): Result<Unit> {
+        val faction = getFactionByPlayer(playerId)
+        if (faction != null) {
+            if (faction.isLeader(playerId)) {
+                return Result.failure(IllegalStateException("Transfer faction leadership or disband the faction before leaving the team"))
+            }
+            removeMember(faction, playerId)
+        }
+        pendingInvites.remove(playerId)
+        return Result.success(Unit)
+    }
+
+    fun forceRemoveMember(playerId: UUID): Result<Unit> {
+        val faction = getFactionByPlayer(playerId)
+            ?: return Result.failure(IllegalArgumentException("Player is not in a faction"))
+        if (faction.isLeader(playerId)) {
+            return Result.failure(IllegalStateException("Transfer leadership or disband the faction before removing its leader"))
+        }
+        removeMember(faction, playerId)
+        return Result.success(Unit)
+    }
+
+    private fun removeMember(faction: Faction, playerId: UUID) {
+        faction.members.remove(playerId)
+        faction.officers.remove(playerId)
+        playerFactions.remove(playerId, faction.id)
+        pendingInvites.remove(playerId)
     }
     
     /**
@@ -322,6 +357,9 @@ class FactionManager(private val plugin: GGvGPlugin) {
         
         if (!faction.isMember(targetId)) {
             return Result.failure(IllegalArgumentException("Player is not in this faction"))
+        }
+        if (faction.isLeader(targetId)) {
+            return Result.failure(IllegalStateException("The leader cannot also be promoted to officer"))
         }
         
         if (faction.isOfficer(targetId)) {
@@ -364,6 +402,12 @@ class FactionManager(private val plugin: GGvGPlugin) {
         
         if (!faction.isMember(newLeaderId)) {
             return Result.failure(IllegalArgumentException("New leader must be a faction member"))
+        }
+        if (newLeaderId == currentLeaderId) {
+            return Result.failure(IllegalArgumentException("That player is already the faction leader"))
+        }
+        if (plugin.teams.manager.getPlayerTeam(newLeaderId)?.id != faction.teamId) {
+            return Result.failure(IllegalStateException("New leader must still be on the faction's team"))
         }
         
         // Create new faction with updated leader
@@ -409,11 +453,29 @@ class FactionManager(private val plugin: GGvGPlugin) {
      * Load factions from persistence
      */
     fun loadFactions(loadedFactions: List<Faction>) {
+        val seenMembers = mutableSetOf<UUID>()
+        val seenIds = mutableSetOf<String>()
+        loadedFactions.forEach { faction ->
+            require(seenIds.add(faction.id)) { "Duplicate faction id ${faction.id}" }
+            require(faction.leaderId in faction.members) { "Faction ${faction.name} has no leader in its membership" }
+            require(faction.officers.all { it in faction.members && it != faction.leaderId }) {
+                "Faction ${faction.name} has officers who are not eligible members"
+            }
+            faction.members.forEach { memberId ->
+                require(seenMembers.add(memberId)) { "Player $memberId is in multiple factions" }
+                require(plugin.teams.manager.getPlayerTeam(memberId)?.id == faction.teamId) {
+                    "Player $memberId is not on the saved team for faction ${faction.name}"
+                }
+            }
+        }
         factions.clear()
         playerFactions.clear()
+        pendingInvites.clear()
+        factionStats.clear()
         
         loadedFactions.forEach { faction ->
             factions[faction.id] = faction
+            factionStats[faction.id] = FactionStats(faction.id)
             faction.members.forEach { memberId ->
                 playerFactions[memberId] = faction.id
             }

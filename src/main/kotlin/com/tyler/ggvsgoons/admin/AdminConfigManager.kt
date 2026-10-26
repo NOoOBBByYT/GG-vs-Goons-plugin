@@ -1,7 +1,6 @@
 package com.tyler.ggvsgoons.admin
 
 import com.tyler.ggvsgoons.GGvGPlugin
-import org.bukkit.configuration.file.FileConfiguration
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -15,31 +14,6 @@ class AdminConfigManager(
 ) {
     
     private val configCache = ConcurrentHashMap<String, Any>()
-    private val moduleStates = ConcurrentHashMap<String, Boolean>()
-    
-    init {
-        // Initialize module states
-        moduleStates["warprisoner"] = true
-        moduleStates["teams"] = true
-        moduleStates["factions"] = plugin.config.getBoolean("factions.enabled", true)
-        moduleStates["admin"] = plugin.config.getBoolean("admin.enabled", true)
-        moduleStates["discord"] = plugin.config.getBoolean("discord.enabled", false)
-        
-        // Cache current config values
-        cacheConfigValues()
-    }
-    
-    /**
-     * Cache all configuration values for quick access
-     */
-    private fun cacheConfigValues() {
-        val config = plugin.config
-        
-        // Cache all known config paths
-        validator.isValidPath("prisoner.offer-expiry-timeout") // Just to get the list
-        // In a real implementation, we'd iterate through all valid paths
-        // For now, we'll cache on-demand
-    }
     
     /**
      * Get a configuration value
@@ -85,6 +59,15 @@ class AdminConfigManager(
         }
         
         val validatedValue = (validationResult as ValidationResult.Valid).value
+        if (path in setOf(
+                "prisoner.offer-expiry-timeout", "prisoner.enable-persistence",
+                "factions.enable-persistence", "admin.permissions.use-luckperms",
+                "admin.audit.retention-days", "admin.audit.log-player-actions",
+                "admin.audit.log-config-changes", "admin.audit.log-mod-actions",
+                "admin.backups.auto-backup-interval", "admin.backups.max-backups"
+            )) {
+            return Result.failure(UnsupportedOperationException("$path is initialized at startup; edit config.yml and fully restart the server"))
+        }
         
         // Get old value for audit log
         val oldValue = getConfigValue(path)
@@ -117,8 +100,7 @@ class AdminConfigManager(
         // Notify specific modules based on the path
         when {
             path.startsWith("factions.") -> {
-                // Reload faction manager config if it exists
-                // Just log the change
+                if (plugin.factions.isRegistered) plugin.factions.manager.loadConfig()
                 plugin.logger.info("Faction configuration changed: $path = $value")
             }
             path.startsWith("teams.") -> {
@@ -182,12 +164,8 @@ class AdminConfigManager(
         return try {
             plugin.reloadConfig()
             configCache.clear()
-            cacheConfigValues()
             
-            // Update module states
-            moduleStates["factions"] = plugin.config.getBoolean("factions.enabled", true)
-            moduleStates["admin"] = plugin.config.getBoolean("admin.enabled", true)
-            moduleStates["discord"] = plugin.config.getBoolean("discord.enabled", false)
+            if (plugin.factions.isRegistered) plugin.factions.manager.loadConfig()
             
             Result.success(Unit)
         } catch (e: Exception) {
@@ -215,7 +193,7 @@ class AdminConfigManager(
         
         modules["warprisoner"] = ModuleInfo(
             name = "War Prisoner",
-            enabled = moduleStates["warprisoner"] ?: true,
+            enabled = true,
             description = "Capture and manage war prisoners",
             dependencies = listOf("teams"),
             version = "1.0.0"
@@ -223,7 +201,7 @@ class AdminConfigManager(
         
         modules["teams"] = ModuleInfo(
             name = "Teams",
-            enabled = moduleStates["teams"] ?: true,
+            enabled = true,
             description = "GG vs Goons team system",
             dependencies = emptyList(),
             version = "1.0.0"
@@ -231,7 +209,7 @@ class AdminConfigManager(
         
         modules["factions"] = ModuleInfo(
             name = "Factions",
-            enabled = moduleStates["factions"] ?: false,
+            enabled = plugin.factions.isRegistered && plugin.config.getBoolean("factions.enabled", true),
             description = "Sub-groups within teams",
             dependencies = listOf("teams"),
             version = "1.0.0"
@@ -239,16 +217,8 @@ class AdminConfigManager(
         
         modules["admin"] = ModuleInfo(
             name = "Admin Configuration",
-            enabled = moduleStates["admin"] ?: true,
+            enabled = plugin.admin.isRegistered && plugin.config.getBoolean("admin.enabled", true),
             description = "Runtime configuration and moderation",
-            dependencies = emptyList(),
-            version = "1.0.0"
-        )
-        
-        modules["discord"] = ModuleInfo(
-            name = "Discord Integration",
-            enabled = moduleStates["discord"] ?: false,
-            description = "Discord bot integration",
             dependencies = emptyList(),
             version = "1.0.0"
         )
@@ -263,14 +233,11 @@ class AdminConfigManager(
         val configPath = when (moduleName.lowercase()) {
             "factions" -> "factions.enabled"
             "admin" -> "admin.enabled"
-            "discord" -> "discord.enabled"
-            else -> return Result.failure(IllegalArgumentException("Cannot enable/disable core module: $moduleName"))
+            else -> return Result.failure(IllegalArgumentException("Module '$moduleName' is not toggleable or not implemented"))
         }
         
         val result = setConfigValue(configPath, true, adminId, adminName, "Module enabled")
         if (result.isSuccess) {
-            moduleStates[moduleName.lowercase()] = true
-            
             // Log the action
             val action = ModerationAction(
                 adminId = adminId,
@@ -291,14 +258,11 @@ class AdminConfigManager(
         val configPath = when (moduleName.lowercase()) {
             "factions" -> "factions.enabled"
             "admin" -> "admin.enabled"
-            "discord" -> "discord.enabled"
-            else -> return Result.failure(IllegalArgumentException("Cannot enable/disable core module: $moduleName"))
+            else -> return Result.failure(IllegalArgumentException("Module '$moduleName' is not toggleable or not implemented"))
         }
         
         val result = setConfigValue(configPath, false, adminId, adminName, "Module disabled")
         if (result.isSuccess) {
-            moduleStates[moduleName.lowercase()] = false
-            
             // Log the action
             val action = ModerationAction(
                 adminId = adminId,
@@ -318,15 +282,11 @@ class AdminConfigManager(
     fun reloadModule(moduleName: String): Result<Unit> {
         return when (moduleName.lowercase()) {
             "factions" -> {
-                // Reload faction module if it exists
-                plugin.logger.info("Reloading factions module...")
+                if (!plugin.factions.isRegistered) return Result.failure(IllegalStateException("Factions module is not registered"))
+                plugin.factions.manager.loadConfig()
                 Result.success(Unit)
             }
-            "teams" -> {
-                plugin.logger.info("Reloading teams module...")
-                Result.success(Unit)
-            }
-            else -> Result.failure(IllegalArgumentException("Module not found or cannot be reloaded: $moduleName"))
+            else -> Result.failure(UnsupportedOperationException("Module '$moduleName' does not support a runtime reload; use /ggadmin config reload for configuration changes"))
         }
     }
     
@@ -341,6 +301,6 @@ class AdminConfigManager(
      * Check if a module is enabled
      */
     fun isModuleEnabled(moduleName: String): Boolean {
-        return moduleStates[moduleName.lowercase()] ?: false
+        return listModules()[moduleName.lowercase()]?.enabled ?: false
     }
 }

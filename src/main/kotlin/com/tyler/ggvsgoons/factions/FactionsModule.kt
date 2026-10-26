@@ -13,18 +13,14 @@ class FactionsModule(private val plugin: GGvGPlugin) : GGvGModule {
     
     lateinit var manager: FactionManager
         private set
+    val isRegistered: Boolean get() = ::manager.isInitialized
     
-    private lateinit var eventListener: FactionEventListener
     private var cleanupTaskId: Int = -1
+    private var persistenceLoaded = false
     
     override fun register(plugin: GGvGPlugin) {
-        // Check if factions are enabled
-        if (!plugin.config.getBoolean("factions.enabled", true)) {
-            plugin.logger.info("Factions system is disabled")
-            return
-        }
-        
-        // Initialize manager
+        // Keep the manager and saved data available even while commands are disabled.
+        // This avoids losing faction data and lets the feature be toggled at runtime.
         manager = FactionManager(plugin)
         manager.loadConfig()
         
@@ -37,10 +33,6 @@ class FactionsModule(private val plugin: GGvGPlugin) : GGvGModule {
         val chatCommand = FactionChatCommand(plugin, manager)
         plugin.getCommand("fc")?.setExecutor(chatCommand)
         
-        // Register event listener
-        eventListener = FactionEventListener(plugin, manager)
-        Bukkit.getPluginManager().registerEvents(eventListener, plugin)
-        
         // Load persisted faction data
         if (plugin.config.getBoolean("factions.enable-persistence", true)) {
             loadFactions()
@@ -51,7 +43,7 @@ class FactionsModule(private val plugin: GGvGPlugin) : GGvGModule {
             manager.cleanupExpiredInvites()
         }, 6000L, 6000L) // 5 minutes in ticks
         
-        plugin.logger.info("Factions module enabled")
+        plugin.logger.info("Factions module ${if (plugin.config.getBoolean("factions.enabled", true)) "enabled" else "disabled (data retained)"}")
     }
     
     /**
@@ -66,6 +58,7 @@ class FactionsModule(private val plugin: GGvGPlugin) : GGvGModule {
         val factionsFile = File(dataFolder, "factions.yml")
         val loadedFactions = FactionPersistence.loadFactions(factionsFile, plugin.logger)
         manager.loadFactions(loadedFactions)
+        persistenceLoaded = true
         
         plugin.logger.info("Loaded ${loadedFactions.size} faction(s)")
     }
@@ -75,6 +68,10 @@ class FactionsModule(private val plugin: GGvGPlugin) : GGvGModule {
      */
     fun saveFactions() {
         if (!plugin.config.getBoolean("factions.enable-persistence", true)) {
+            return
+        }
+        if (!persistenceLoaded || !::manager.isInitialized) {
+            plugin.logger.severe("Faction data was not loaded successfully; refusing to overwrite factions.yml")
             return
         }
         
@@ -93,6 +90,6 @@ class FactionsModule(private val plugin: GGvGPlugin) : GGvGModule {
         }
         
         // Save factions
-        saveFactions()
+        if (::manager.isInitialized) saveFactions()
     }
 }

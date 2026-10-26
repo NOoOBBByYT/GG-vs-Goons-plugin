@@ -45,7 +45,7 @@ object FactionPersistence {
                 }
             }
             
-            config.save(file)
+            SafeYaml.save(config, file)
             logger.info("Saved ${factions.size} faction(s) to ${file.name}")
         } catch (e: Exception) {
             logger.severe("Failed to save factions: ${e.message}")
@@ -63,33 +63,39 @@ object FactionPersistence {
         }
         
         try {
-            val config = YamlConfiguration.loadConfiguration(file)
+            val config = SafeYaml.load(file)
             val factions = mutableListOf<Faction>()
             
-            val factionsSection = config.getConfigurationSection("factions") ?: return emptyList()
+            val factionsSection = SafeYaml.requireSection(config, "factions", file) ?: return emptyList()
+            val seenMembers = mutableSetOf<UUID>()
             
             for (key in factionsSection.getKeys(false)) {
                 val path = "factions.$key"
                 
                 try {
-                    val id = config.getString("$path.id") ?: continue
-                    val name = config.getString("$path.name") ?: continue
-                    val teamId = config.getString("$path.teamId") ?: continue
-                    val leaderId = UUID.fromString(config.getString("$path.leaderId") ?: continue)
+                    require(config.isConfigurationSection(path)) { "Invalid faction entry $key" }
+                    val id = requireNotNull(config.getString("$path.id")) { "Missing faction id at $key" }
+                    val name = requireNotNull(config.getString("$path.name")) { "Missing faction name at $key" }
+                    val teamId = requireNotNull(config.getString("$path.teamId")) { "Missing team for $name" }
+                    require(teamId == "gg" || teamId == "goons") { "Unknown team for $name" }
+                    val leaderId = UUID.fromString(requireNotNull(config.getString("$path.leaderId")) { "Missing leader for $name" })
+                    require(config.isList("$path.members") && config.getList("$path.members")?.all { it is String } == true) { "Invalid members for $name" }
+                    require(config.isList("$path.officers") && config.getList("$path.officers")?.all { it is String } == true) { "Invalid officers for $name" }
                     
                     val members = config.getStringList("$path.members")
-                        .mapNotNull { 
-                            try { UUID.fromString(it) } 
-                            catch (e: Exception) { null }
-                        }
+                        .map { UUID.fromString(it) }
                         .toMutableSet()
+                    require(leaderId in members) { "Leader missing from members for $name" }
+                    require(members.size == config.getStringList("$path.members").size) { "Duplicate members in $name" }
                     
                     val officers = config.getStringList("$path.officers")
-                        .mapNotNull { 
-                            try { UUID.fromString(it) } 
-                            catch (e: Exception) { null }
-                        }
+                        .map { UUID.fromString(it) }
                         .toMutableSet()
+                    require(officers.size == config.getStringList("$path.officers").size) { "Duplicate officers in $name" }
+                    require((members + leaderId).none { it in seenMembers }) { "Duplicate faction membership in $name" }
+                    seenMembers.addAll(members + leaderId)
+                    require(officers.all { it in members }) { "Officer missing from members in $name" }
+                    require(factions.none { it.id == id }) { "Duplicate faction id $id" }
                     
                     val description = config.getString("$path.description") ?: ""
                     val colorName = config.getString("$path.color") ?: "WHITE"
@@ -101,24 +107,26 @@ object FactionPersistence {
                     
                     val createdAt = config.getLong("$path.createdAt", System.currentTimeMillis())
                     val maxMembers = config.getInt("$path.maxMembers", 10)
+                    require(!config.contains("$path.createdAt") || config.get("$path.createdAt") is Number) { "Invalid creation time for $name" }
+                    require(!config.contains("$path.maxMembers") || config.get("$path.maxMembers") is Number) { "Invalid capacity for $name" }
+                    require(maxMembers >= members.size) { "Faction $name has more members than its saved capacity" }
                     
                     // Load home location if exists
                     var homeLocation: Location? = null
-                    if (config.contains("$path.home.world")) {
-                        val worldName = config.getString("$path.home.world")
-                        val world = Bukkit.getWorld(worldName ?: "")
-                        
-                        if (world != null) {
-                            val x = config.getDouble("$path.home.x")
-                            val y = config.getDouble("$path.home.y")
-                            val z = config.getDouble("$path.home.z")
-                            val yaw = config.getDouble("$path.home.yaw").toFloat()
-                            val pitch = config.getDouble("$path.home.pitch").toFloat()
-                            
-                            homeLocation = Location(world, x, y, z, yaw, pitch)
-                        } else {
-                            logger.warning("World '$worldName' not found for faction $name home location")
+                    if (config.contains("$path.home")) {
+                        require(config.isConfigurationSection("$path.home")) { "Invalid home for $name" }
+                        val worldName = requireNotNull(config.getString("$path.home.world")) { "Missing home world for $name" }
+                        val world = Bukkit.getWorld(worldName)
+                        require(world != null) { "World '$worldName' is not loaded; refusing to lose $name home" }
+                        listOf("x", "y", "z", "yaw", "pitch").forEach { coordinate ->
+                            require(config.get("$path.home.$coordinate") is Number) { "Invalid home $coordinate for $name" }
                         }
+                        val x = config.getDouble("$path.home.x")
+                        val y = config.getDouble("$path.home.y")
+                        val z = config.getDouble("$path.home.z")
+                        val yaw = config.getDouble("$path.home.yaw").toFloat()
+                        val pitch = config.getDouble("$path.home.pitch").toFloat()
+                        homeLocation = Location(world, x, y, z, yaw, pitch)
                     }
                     
                     val faction = Faction(
@@ -137,16 +145,14 @@ object FactionPersistence {
                     
                     factions.add(faction)
                 } catch (e: Exception) {
-                    logger.warning("Failed to load faction at index $key: ${e.message}")
+                    throw IllegalStateException("Invalid faction at index $key in ${file.name}", e)
                 }
             }
             
             logger.info("Loaded ${factions.size} faction(s) from ${file.name}")
             return factions
         } catch (e: Exception) {
-            logger.severe("Failed to load factions: ${e.message}")
-            e.printStackTrace()
-            return emptyList()
+            throw IllegalStateException("Failed to load factions from ${file.name}; original file was not modified", e)
         }
     }
 }

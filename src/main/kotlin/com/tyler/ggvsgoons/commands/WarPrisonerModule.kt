@@ -9,6 +9,12 @@ import org.bukkit.command.Command
 import org.bukkit.command.CommandExecutor
 import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
+import org.bukkit.event.EventHandler
+import org.bukkit.event.EventPriority
+import org.bukkit.event.Listener
+import org.bukkit.event.player.PlayerJoinEvent
+import org.bukkit.event.player.PlayerQuitEvent
+import org.bukkit.event.player.PlayerRespawnEvent
 import java.util.UUID
 
 /**
@@ -19,27 +25,46 @@ import java.util.UUID
  */
 class WarPrisonerModule(
     private val plugin: GGvGPlugin,
-    offerExpirySeconds: Int,
-    private val permissionsEnabled: Boolean
-) : GGvGModule {
+    offerExpirySeconds: Int
+) : GGvGModule, Listener {
 
     val manager = PrisonerManager(plugin, offerExpirySeconds)
 
     override fun register(plugin: GGvGPlugin) {
-        plugin.getCommand("warprisoner")?.setExecutor(WarPrisonerCommand(this, plugin, permissionsEnabled))
+        plugin.getCommand("warprisoner")?.setExecutor(WarPrisonerCommand(this, plugin))
         plugin.getCommand("warprisoneraccept")?.setExecutor(WarPrisonerAcceptCommand(this, plugin))
         plugin.getCommand("warprisonerdecline")?.setExecutor(WarPrisonerDeclineCommand(this, plugin))
-        plugin.getCommand("freeprisoner")?.setExecutor(FreePrisonerCommand(this, plugin, permissionsEnabled))
-        plugin.getCommand("executeprisoner")?.setExecutor(ExecutePrisonerCommand(this, plugin, permissionsEnabled))
-        plugin.getCommand("listprisoners")?.setExecutor(ListPrisonersCommand(this, plugin, permissionsEnabled))
+        plugin.getCommand("freeprisoner")?.setExecutor(FreePrisonerCommand(this, plugin))
+        plugin.getCommand("executeprisoner")?.setExecutor(ExecutePrisonerCommand(this, plugin))
+        plugin.getCommand("listprisoners")?.setExecutor(ListPrisonersCommand(this, plugin))
+        plugin.server.pluginManager.registerEvents(this, plugin)
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    fun onJoin(event: PlayerJoinEvent) {
+        // Other join handlers may set a gamemode; enforce after all join handlers complete.
+        plugin.server.scheduler.runTask(plugin, Runnable {
+            if (event.player.isOnline) manager.enforcePrisonerState(event.player)
+        })
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    fun onRespawn(event: PlayerRespawnEvent) {
+        plugin.server.scheduler.runTask(plugin, Runnable {
+            if (event.player.isOnline) manager.enforcePrisonerState(event.player)
+        })
+    }
+
+    @EventHandler
+    fun onQuit(event: PlayerQuitEvent) {
+        manager.clearOffersForPlayer(event.player.uniqueId)
     }
 }
 
 // /warprisoner <target> — issue a capture offer
 class WarPrisonerCommand(
     private val module: WarPrisonerModule,
-    private val plugin: GGvGPlugin,
-    private val permissionsEnabled: Boolean
+    private val plugin: GGvGPlugin
 ) : CommandExecutor {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (sender !is Player) {
@@ -48,7 +73,7 @@ class WarPrisonerCommand(
         }
 
         // Check permissions
-        if (permissionsEnabled && !sender.hasPermission("ggvgoons.warprisoner.capture")) {
+        if (!sender.hasPermission("ggvgoons.warprisoner.capture")) {
             sender.sendMessage("${ChatColor.RED}You don't have permission to use this command.")
             return true
         }
@@ -92,6 +117,10 @@ class WarPrisonerCommand(
             sender.sendMessage("${ChatColor.RED}${target.name} is already someone's prisoner.")
             return true
         }
+        if (module.manager.isPrisoner(sender.uniqueId)) {
+            sender.sendMessage("${ChatColor.RED}Prisoners cannot capture other players.")
+            return true
+        }
 
         if (!module.manager.createOffer(sender, target)) {
             sender.sendMessage("${ChatColor.RED}${target.name} already has a pending offer.")
@@ -127,18 +156,10 @@ class WarPrisonerAcceptCommand(private val module: WarPrisonerModule, private va
         if (args.isEmpty()) return true
 
         val captorId = runCatching { UUID.fromString(args[0]) }.getOrNull() ?: return true
-        val confirmedCaptorId = module.manager.consumeOffer(sender.uniqueId, captorId) ?: run {
+        val captor = module.manager.acceptOffer(sender, captorId) ?: run {
             sender.sendMessage("${ChatColor.RED}That offer is no longer valid.")
             return true
         }
-
-        val captor = plugin.server.getPlayer(confirmedCaptorId)
-        if (captor == null) {
-            sender.sendMessage("${ChatColor.RED}Your captor logged off before you could accept.")
-            return true
-        }
-
-        module.manager.takePrisoner(sender, captor)
 
         sender.sendMessage("${ChatColor.GOLD}You are now a war prisoner. You've been set to Adventure mode.")
         captor.sendMessage("${ChatColor.GREEN}${sender.name} accepted — they're your prisoner now.")
@@ -170,8 +191,7 @@ class WarPrisonerDeclineCommand(private val module: WarPrisonerModule, private v
 // /freeprisoner <target> — captor releases their prisoner
 class FreePrisonerCommand(
     private val module: WarPrisonerModule,
-    private val plugin: GGvGPlugin,
-    private val permissionsEnabled: Boolean
+    private val plugin: GGvGPlugin
 ) : CommandExecutor {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (sender !is Player) {
@@ -180,7 +200,7 @@ class FreePrisonerCommand(
         }
 
         // Check permissions
-        if (permissionsEnabled && !sender.hasPermission("ggvgoons.warprisoner.free")) {
+        if (!sender.hasPermission("ggvgoons.warprisoner.free")) {
             sender.sendMessage("${ChatColor.RED}You don't have permission to use this command.")
             return true
         }
@@ -201,7 +221,10 @@ class FreePrisonerCommand(
             return true
         }
 
-        module.manager.releasePrisoner(target.uniqueId)
+        if (!module.manager.releasePrisoner(target.uniqueId)) {
+            sender.sendMessage("${ChatColor.RED}Could not release ${target.name}; their state has been preserved.")
+            return true
+        }
         target.sendMessage("${ChatColor.GREEN}You've been released.")
         sender.sendMessage("${ChatColor.GRAY}You released ${target.name}.")
 
@@ -209,12 +232,10 @@ class FreePrisonerCommand(
     }
 }
 
-// /executeprisoner <target> — captor ends the arrangement without restoring gamemode kindness;
-// actual killing is up to the captor in-game, this just clears the tracked state
+// /executeprisoner <target> ends captivity without killing the player; restore their previous mode.
 class ExecutePrisonerCommand(
     private val module: WarPrisonerModule,
-    private val plugin: GGvGPlugin,
-    private val permissionsEnabled: Boolean
+    private val plugin: GGvGPlugin
 ) : CommandExecutor {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (sender !is Player) {
@@ -223,7 +244,7 @@ class ExecutePrisonerCommand(
         }
 
         // Check permissions
-        if (permissionsEnabled && !sender.hasPermission("ggvgoons.warprisoner.execute")) {
+        if (!sender.hasPermission("ggvgoons.warprisoner.execute")) {
             sender.sendMessage("${ChatColor.RED}You don't have permission to use this command.")
             return true
         }
@@ -244,9 +265,12 @@ class ExecutePrisonerCommand(
             return true
         }
 
-        module.manager.clearPrisonerState(target.uniqueId)
-        target.sendMessage("${ChatColor.DARK_RED}Your captor has ended your imprisonment. Good luck.")
-        sender.sendMessage("${ChatColor.GRAY}${target.name} is no longer marked as your prisoner.")
+        if (!module.manager.releasePrisoner(target.uniqueId)) {
+            sender.sendMessage("${ChatColor.RED}Could not end ${target.name}'s imprisonment; their state has been preserved.")
+            return true
+        }
+        target.sendMessage("${ChatColor.DARK_RED}Your captor ended your imprisonment. Your previous game mode has been restored.")
+        sender.sendMessage("${ChatColor.GRAY}${target.name} is no longer a prisoner. This command does not kill players.")
 
         return true
     }
@@ -255,12 +279,11 @@ class ExecutePrisonerCommand(
 // /listprisoners — show all active prisoners
 class ListPrisonersCommand(
     private val module: WarPrisonerModule,
-    private val plugin: GGvGPlugin,
-    private val permissionsEnabled: Boolean
+    private val plugin: GGvGPlugin
 ) : CommandExecutor {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         // Check permissions
-        if (permissionsEnabled && sender is Player && !sender.hasPermission("ggvgoons.warprisoner.list")) {
+        if (sender is Player && !sender.hasPermission("ggvgoons.warprisoner.list")) {
             sender.sendMessage("${ChatColor.RED}You don't have permission to use this command.")
             return true
         }
